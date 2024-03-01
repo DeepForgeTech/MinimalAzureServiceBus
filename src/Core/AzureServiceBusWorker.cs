@@ -19,7 +19,7 @@ namespace MinimalAzureServiceBus.Core
         private readonly ILogger<AzureServiceBusWorkerRegistration> _logger;
         private readonly IServiceScopeFactory _serviceScopeFactory;
 
-        public AzureServiceBusWorker(AzureServiceBusWorkerRegistrationDetail registration, ILogger<AzureServiceBusWorkerRegistration> logger, IServiceScopeFactory serviceScopeFactory)
+        internal AzureServiceBusWorker(AzureServiceBusWorkerRegistrationDetail registration, ILogger<AzureServiceBusWorkerRegistration> logger, IServiceScopeFactory serviceScopeFactory)
         {
             _registration = registration;
             _logger = logger;
