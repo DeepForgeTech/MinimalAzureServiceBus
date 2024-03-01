@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace MinimalAzureServiceBus.Core
 {
-    internal class AzureServiceBusWorkerRegistrationDetail : AzureServiceBusWorkerRegistration
+    public class AzureServiceBusWorkerRegistrationDetail : AzureServiceBusWorkerRegistration
     {
         public AzureServiceBusWorkerRegistrationDetail(string serviceBusConnectionString, string appName) : base(serviceBusConnectionString, appName)
         {
