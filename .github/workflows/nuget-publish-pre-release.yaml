@@ -2,7 +2,7 @@ name: Build and Publish NuGet Package
 
 on:
   pull_request:
-    types: ['opened', 'edited', 'reopened', 'synchronize', 'ready_for_review']
+    types: ['opened', 'edited', 'reopened', 'synchronize', 'ready_for_review', 'closed']
     branches:
     - main
 
@@ -22,11 +22,16 @@ jobs:
     - name: Set Package Version
       run: echo >>$GITHUB_ENV PACKAGE_VERSION=${{ secrets.MAJOR_VERSION }}.${{ secrets.MINOR_VERSION }}.$GITHUB_RUN_NUMBER
 
+    - name: Set version suffix
+      if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+      run: |
+        echo >>$GITHUB_ENV PACKAGE_VERSION=${{ env.PACKAGE_VERSION }}-rc
+
     - name: Build solution
-      run: dotnet build MinimalAzureServiceBus.sln --configuration Release /p:Version=${{ env.PACKAGE_VERSION }}-rc
+      run: dotnet build MinimalAzureServiceBus.sln --configuration Release /p:Version=${{ env.PACKAGE_VERSION }}
 
     - name: Pack NuGet package
-      run: dotnet pack src/Core/Core.csproj --no-build --configuration Release --output ./nupkg /p:Version=${{ env.PACKAGE_VERSION }}-rc -p:PackageID=MinimalAzureServiceBus
+      run: dotnet pack src/Core/Core.csproj --no-build --configuration Release --output ./nupkg /p:Version=${{ env.PACKAGE_VERSION }} -p:PackageID=MinimalAzureServiceBus
 
     - name: Publish to NuGet
       run: dotnet nuget push "./nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
