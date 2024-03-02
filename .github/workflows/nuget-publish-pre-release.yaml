@@ -1,0 +1,40 @@
+name: Build and Publish NuGet Package
+
+on:
+  pull_request:
+    types: ['opened', 'edited', 'reopened', 'synchronize', 'ready_for_review', 'closed']
+    branches:
+    - main
+
+jobs:
+  build:
+    if: github.event.action != 'closed' || (github.event.action == 'closed' && github.event.pull_request.merged)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 6.0.x
+
+    - name: Set Package Version
+      run: echo >>$GITHUB_ENV PACKAGE_VERSION=${{ secrets.MAJOR_VERSION }}.${{ secrets.MINOR_VERSION }}.$GITHUB_RUN_NUMBER
+
+    - name: Set version suffix
+      if: github.event.action != 'closed'
+      run: |
+        echo >>$GITHUB_ENV PACKAGE_VERSION=${{ env.PACKAGE_VERSION }}-rc
+
+    - name: Build solution
+      run: dotnet build MinimalAzureServiceBus.sln --configuration Release /p:Version=${{ env.PACKAGE_VERSION }}
+
+    - name: Pack NuGet package
+      run: dotnet pack src/Core/Core.csproj --no-build --configuration Release --output ./nupkg /p:Version=${{ env.PACKAGE_VERSION }} -p:PackageID=MinimalAzureServiceBus
+
+    - name: Publish to NuGet
+      run: dotnet nuget push "./nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
