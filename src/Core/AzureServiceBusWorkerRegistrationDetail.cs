@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Azure.Messaging.ServiceBus;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace MinimalAzureServiceBus.Core
@@ -12,8 +11,9 @@ namespace MinimalAzureServiceBus.Core
         {
         }
 
+        internal ErrorHandlingConfiguration ErrorHandlingConfiguration => _errorHandlingConfiguration;
         internal string ServiceBusConnectionString => _serviceBusConnectionString;
         internal string AppName => _appName;
-        internal Dictionary<(string Name, string Type), Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>>> HandlerRegistrations => _handlerRegistrations;
+        internal Dictionary<(string Name, string Type), Func<AsyncServiceScope, string, Task>> HandlerRegistrations => _handlerRegistrations;
     }
 }

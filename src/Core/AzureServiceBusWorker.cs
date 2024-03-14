@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 
 namespace MinimalAzureServiceBus.Core
 {
+
     public sealed class AzureServiceBusWorker : BackgroundService
     {
         private ServiceBusClient? _serviceBusClient;
@@ -50,7 +51,9 @@ namespace MinimalAzureServiceBus.Core
         private async Task TaskCompletion(CancellationToken stoppingToken)
         {
             var taskCompletionSource = new TaskCompletionSource<bool>();
+
             StoppingTokenRegistration = stoppingToken.Register(() => taskCompletionSource.SetResult(true));
+
             await taskCompletionSource.Task;
         }
 
@@ -83,11 +86,21 @@ namespace MinimalAzureServiceBus.Core
 
                 var processor = _processors[key];
 
-                processor.ProcessMessageAsync += handler(_serviceScopeFactory);
+                processor.ProcessMessageAsync += WrapHandler(handler);
             }
 
             return base.StartAsync(cancellationToken);
         }
+
+        private Func<ProcessMessageEventArgs, Task> WrapHandler(Func<AsyncServiceScope, string, Task> handler) =>
+            async args =>
+            {
+                await using var scope = _serviceScopeFactory.CreateAsyncScope();
+
+                var body = args.Message.Body.ToString();
+
+                await handler(scope, body);
+            };
 
         private Task ErrorHandlerAsync(ProcessErrorEventArgs arg) =>
             Task.Delay(0);
@@ -105,6 +118,7 @@ namespace MinimalAzureServiceBus.Core
                 await _serviceBusClient.DisposeAsync();
 
             await base.StopAsync(cancellationToken);
+
             _logger.LogInformation("Azure Service Bus Worker Stopped at: {time}", DateTimeOffset.Now);
         }
 
