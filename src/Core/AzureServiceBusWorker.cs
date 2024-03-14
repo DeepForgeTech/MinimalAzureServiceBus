@@ -10,7 +10,6 @@ using Microsoft.Extensions.Logging;
 
 namespace MinimalAzureServiceBus.Core
 {
-
     public sealed class AzureServiceBusWorker : BackgroundService
     {
         private ServiceBusClient? _serviceBusClient;
@@ -102,8 +101,11 @@ namespace MinimalAzureServiceBus.Core
                 await handler(scope, body);
             };
 
-        private Task ErrorHandlerAsync(ProcessErrorEventArgs arg) =>
-            Task.Delay(0);
+        private Task ErrorHandlerAsync(ProcessErrorEventArgs arg)
+        {
+            _logger.LogError(arg.Exception, "An error occurred while processing a message.");
+            return Task.Delay(0);
+        }
 
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
