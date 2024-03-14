@@ -7,98 +7,129 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace MinimalAzureServiceBus.Core
 {
+    public delegate AzureServiceBusWorkerRegistration AzureServiceBusWorkerRegistrationDelegate(
+        string queueName,
+        Func<AsyncServiceScope, string, Task> handlerFactoryFunc);
+
     public class AzureServiceBusWorkerRegistration
     {
-        protected Dictionary<(string Name, string Type), Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>>> _handlerRegistrations = new Dictionary<(string Name, string Type), Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>>>();
+        protected Dictionary<(string Name, string Type), Func<AsyncServiceScope, string, Task>> _handlerRegistrations = new Dictionary<(string Name, string Type), Func<AsyncServiceScope, string, Task>>();
+
+        private readonly AzureServiceBusWorkerRegistrationDelegate AddQueueRegistration;
+        private readonly AzureServiceBusWorkerRegistrationDelegate AddTopicRegistration;
 
         internal AzureServiceBusWorkerRegistration(string serviceBusConnectionString, string appName)
         {
             _serviceBusConnectionString = serviceBusConnectionString;
             _appName = appName;
+
+            AddQueueRegistration = AddRegistration("Queue");
+            AddTopicRegistration = AddRegistration("Topic");
         }
 
         protected readonly string _serviceBusConnectionString;
         protected readonly string _appName;
 
-        public AzureServiceBusWorkerRegistration ProcessQueue<TMessage>(string queueName, Func<TMessage, Task> handler) where TMessage : class
-        {
-            _handlerRegistrations.Add((queueName, "Queue"), MessageHandler(handler));
+        protected ErrorHandlingConfiguration? _errorHandlingConfiguration;
 
-            return this;
-        }
+        private AzureServiceBusWorkerRegistrationDelegate AddRegistration(string type) =>
+            (name, handlerFactory) =>
+            {
+                _handlerRegistrations.Add((name, type), handlerFactory);
 
-        public AzureServiceBusWorkerRegistration ProcessQueue<TMessage, TService>(string queueName, Func<TMessage, TService, Task> handler) where TMessage : class where TService : notnull
-        {
-            _handlerRegistrations.Add((queueName, "Queue"), MessageHandler(handler));
+                return this;
+            };
 
-            return this;
-        }
+
+        public AzureServiceBusWorkerRegistration ProcessQueue<TMessage>(string queueName, Func<TMessage, Task> handler) where TMessage : class => 
+            AddQueueRegistration(queueName, MessageHandler(handler));
+
+        public AzureServiceBusWorkerRegistration ProcessQueue<TMessage, TService>(string queueName, Func<TMessage, TService, Task> handler) where TMessage : class where TService : notnull =>
+            AddQueueRegistration(queueName, MessageHandler(handler));
 
         public AzureServiceBusWorkerRegistration ProcessQueue<TMessage, TService1, TService2>(string queueName, Func<TMessage, TService1, TService2, Task> handler)
             where TMessage : class
             where TService1 : notnull
-            where TService2 : notnull
-        {
-            _handlerRegistrations.Add((queueName, "Queue"), MessageHandler(handler));
-
-            return this;
-        }
+            where TService2 : notnull =>
+            AddQueueRegistration(queueName, MessageHandler(handler));
 
         public AzureServiceBusWorkerRegistration SubscribeTopic<TMessage>(string topicName, Func<TMessage, Task> handler) where TMessage : class
-        {
-            _handlerRegistrations.Add((topicName, "Topic"), MessageHandler(handler));
-
-            return this;
-        }
+            => AddTopicRegistration(topicName, MessageHandler(handler));
 
         public AzureServiceBusWorkerRegistration SubscribeTopic<TMessage, TService>(string topicName, Func<TMessage, TService, Task> handler) where TMessage : class where TService : notnull
-        {
-            _handlerRegistrations.Add((topicName, "Topic"), MessageHandler(handler));
+            => AddTopicRegistration(topicName, MessageHandler(handler));
 
-            return this;
-        }
-
-        private Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>> MessageHandler<TMessage>(Func<TMessage, Task> handler)
-        {
-            return serviceProvider => async arg =>
+        private static Func<AsyncServiceScope, string, Task> MessageHandler<TMessage>(Func<TMessage, Task> handler) =>
+            async (scope, body) =>
             {
-                var body = arg.Message.Body;
                 var message = JsonSerializer.Deserialize<TMessage>(body);
 
                 await handler(message);
             };
-        }
-        private Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>> MessageHandler<TMessage, TService>(Func<TMessage, TService, Task> handler) where TService : notnull
-        {
-            return serviceScopeFactory => async arg =>
+
+        private static Func<AsyncServiceScope, string, Task> MessageHandler<TMessage, TService1, TService2>(Func<TMessage, TService1, TService2, Task> handler) where TService1 : notnull where TService2 : notnull =>
+            async (scope, body) =>
             {
-                await using var scope = serviceScopeFactory.CreateAsyncScope();
-                var service = scope.ServiceProvider.GetRequiredService<TService>();
-
-                var body = arg.Message.Body.ToString();
-                var options = new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                };
-                var message = JsonSerializer.Deserialize<TMessage>(body, options);
-
-                await handler(message, service);
-            };
-        }
-
-        private Func<IServiceScopeFactory, Func<ProcessMessageEventArgs, Task>> MessageHandler<TMessage, TService1, TService2>(Func<TMessage, TService1, TService2, Task> handler) where TService1 : notnull where TService2 : notnull
-        {
-            return serviceScopeFactory => async arg =>
-            {
-                await using var scope = serviceScopeFactory.CreateAsyncScope();
                 var service1 = scope.ServiceProvider.GetRequiredService<TService1>();
                 var service2 = scope.ServiceProvider.GetRequiredService<TService2>();
 
-                var body = arg.Message.Body;
                 var message = JsonSerializer.Deserialize<TMessage>(body);
 
                 await handler(message, service1, service2);
             };
+
+        private static Func<AsyncServiceScope, string, Task> MessageHandler<TMessage, TService>(Func<TMessage, TService, Task> handler) where TService : notnull =>
+            async (scope, body) =>
+            {
+                var service = scope.ServiceProvider.GetRequiredService<TService>();
+                var message = JsonSerializer.Deserialize<TMessage>(body, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                await handler(message, service);
+            };
+
+        /// <summary>
+        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        /// </summary>
+        public AzureServiceBusWorkerRegistration EnableErrorHandling(string? errorQueueName = null)
+        {
+            _errorHandlingConfiguration = new ErrorHandlingConfiguration
+            {
+                ErrorQueueName = $"{_appName}-error"
+            };
+
+            return this;
         }
+
+        /// <summary>
+        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        /// </summary>
+        public AzureServiceBusWorkerRegistration EnableErrorHandling(ErrorHandlingConfiguration exceptionConfiguration)
+        {
+            _errorHandlingConfiguration = exceptionConfiguration;
+
+            return this;
+        }
+
+        /// <summary>
+        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        /// </summary>
+        public AzureServiceBusWorkerRegistration EnableErrorHandling(Action<ErrorHandlingConfiguration> configure)
+        {
+            _errorHandlingConfiguration = new ErrorHandlingConfiguration();
+
+            configure(_errorHandlingConfiguration);
+
+            return this;
+        }
+    }
+
+    public class ErrorHandlingConfiguration
+    {
+        public string? ErrorQueueName { get; set; }
+        public bool SendUnhandledExceptionsToErrorQueue { get; set; } = false;
+        public int MaxAllowedRetries { get; set; } = 11;
     }
 }

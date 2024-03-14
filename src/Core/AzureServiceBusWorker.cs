@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.Messaging.ServiceBus;
+using Azure.Messaging.ServiceBus.Administration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,6 +14,7 @@ namespace MinimalAzureServiceBus.Core
     public sealed class AzureServiceBusWorker : BackgroundService
     {
         private ServiceBusClient? _serviceBusClient;
+        private ServiceBusAdministrationClient? _adminClient;
         private Dictionary<(string Name, string Type), ServiceBusProcessor> _processors = new Dictionary<(string Name, string Type), ServiceBusProcessor>();
         public CancellationTokenRegistration StoppingTokenRegistration;
         private readonly AzureServiceBusWorkerRegistrationDetail _registration;
@@ -50,17 +52,21 @@ namespace MinimalAzureServiceBus.Core
         private async Task TaskCompletion(CancellationToken stoppingToken)
         {
             var taskCompletionSource = new TaskCompletionSource<bool>();
+
             StoppingTokenRegistration = stoppingToken.Register(() => taskCompletionSource.SetResult(true));
+
             await taskCompletionSource.Task;
         }
 
-        public override Task StartAsync(CancellationToken cancellationToken)
+        public override async Task StartAsync(CancellationToken cancellationToken)
         {
             _logger.LogInformation("ASB Worker Started at: {time}", DateTimeOffset.Now);
 
-            if (string.IsNullOrEmpty(_registration.ServiceBusConnectionString)) return base.StartAsync(cancellationToken);
+            if (string.IsNullOrEmpty(_registration.ServiceBusConnectionString)) 
+                await base.StartAsync(cancellationToken);
 
             _serviceBusClient = new ServiceBusClient(_registration.ServiceBusConnectionString);
+            _adminClient = new ServiceBusAdministrationClient(_registration.ServiceBusConnectionString);
 
             foreach (var (key, handler) in _registration.HandlerRegistrations)
             {
@@ -68,13 +74,32 @@ namespace MinimalAzureServiceBus.Core
 
                 if (!_processors.ContainsKey(key))
                 {
-                    var newProcessor = type switch
-                    {
-                        "Queue" => _serviceBusClient.CreateProcessor(name),
-                        "Topic" => _serviceBusClient.CreateProcessor(name, _registration.AppName),
+                    ServiceBusProcessor? newProcessor;
 
-                        _ => throw new NotImplementedException($"{type} is not a valid message type. Values are \"Queue\" or \"Topic\"")
-                    };
+                    switch (type)
+                    {
+                        case "Queue":
+                            newProcessor = _serviceBusClient.CreateProcessor(name);
+
+                            break;
+                        case "Topic":
+                        {
+                            var subscriptionExists = await _adminClient.SubscriptionExistsAsync(name, _registration.AppName, cancellationToken);
+
+                            if (!subscriptionExists)
+                            {
+                                _logger.LogInformation("Subscription {Name} does not exist. Creating it now.", name);
+
+                                await _adminClient.CreateSubscriptionAsync(name, _registration.AppName, cancellationToken);
+                            }
+
+                            newProcessor = _serviceBusClient.CreateProcessor(name, _registration.AppName);
+
+                            break;
+                        }
+                        default:
+                            throw new NotImplementedException($"{type} is not a valid message type. Values are \"Queue\" or \"Topic\"");
+                    }
 
                     _processors.Add(key, newProcessor);
 
@@ -83,14 +108,28 @@ namespace MinimalAzureServiceBus.Core
 
                 var processor = _processors[key];
 
-                processor.ProcessMessageAsync += handler(_serviceScopeFactory);
+                processor.ProcessMessageAsync += WrapHandler(handler);
             }
 
-            return base.StartAsync(cancellationToken);
+            await base.StartAsync(cancellationToken);
         }
 
-        private Task ErrorHandlerAsync(ProcessErrorEventArgs arg) =>
-            Task.Delay(0);
+        private Func<ProcessMessageEventArgs, Task> WrapHandler(Func<AsyncServiceScope, string, Task> handler) =>
+            async args =>
+            {
+                await using var scope = _serviceScopeFactory.CreateAsyncScope();
+
+                var body = args.Message.Body.ToString();
+
+                await handler(scope, body);
+            };
+
+        private Task ErrorHandlerAsync(ProcessErrorEventArgs arg)
+        {
+            _logger.LogError(arg.Exception, "An error occurred while processing a message.");
+
+            return Task.Delay(0);
+        }
 
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
@@ -105,6 +144,7 @@ namespace MinimalAzureServiceBus.Core
                 await _serviceBusClient.DisposeAsync();
 
             await base.StopAsync(cancellationToken);
+
             _logger.LogInformation("Azure Service Bus Worker Stopped at: {time}", DateTimeOffset.Now);
         }
 
