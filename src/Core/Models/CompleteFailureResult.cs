@@ -1,4 +1,6 @@
-﻿namespace MinimalAzureServiceBus.Core.Models
+﻿using System;
+
+namespace MinimalAzureServiceBus.Core.Models
 {
     /// <summary>
     /// Indicates a non-recoverable failure where retries are not expected to succeed.
@@ -7,8 +9,8 @@
     /// </summary>
     public class CompleteFailureResult : MessageProcessingResult
     {
-        public CompleteFailureResult(string message) : base(false, message)
-        {
-        }
+        public Exception Exception { get; }
+
+        public CompleteFailureResult(Exception exception, string? message = null) : base(false, message ?? exception.Message) => Exception = exception;
     }
 }
