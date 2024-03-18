@@ -29,7 +29,7 @@ namespace MinimalAzureServiceBus.Core
         protected readonly string _serviceBusConnectionString;
         protected readonly string _appName;
 
-        protected ErrorHandlingConfiguration? _errorHandlingConfiguration;
+        protected ErrorHandlingConfiguration _errorHandlingConfiguration = new ErrorHandlingConfiguration();
 
         private Func<string, Delegate, AzureServiceBusWorkerRegistration> AddRegistration(ServiceBusType registrationType) =>
             (name, handler) =>
@@ -84,6 +84,5 @@ namespace MinimalAzureServiceBus.Core
     {
         public string? ErrorQueueName { get; set; }
         public bool SendUnhandledExceptionsToErrorQueue { get; set; } = false;
-        public int MaxAllowedRetries { get; set; } = 11;
     }
 }

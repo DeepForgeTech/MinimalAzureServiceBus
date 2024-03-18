@@ -28,5 +28,12 @@ namespace MinimalAzureServiceBus.Core.Models
         public Type ReturnType { get; }
         public Type? InnerReturnType { get; }
         public bool ReturnsTask { get; }
+
+        public object? InvokeWith(Dictionary<string, object> parameterValues)
+        {
+            var values = Parameters.Keys.Select(key => parameterValues[key]).ToArray(); // Ensures values are in the correct order
+
+            return Delegate.Method.Invoke(Delegate.Target, values);
+        }
     }
 }

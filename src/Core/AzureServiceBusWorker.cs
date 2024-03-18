@@ -17,13 +17,15 @@ namespace MinimalAzureServiceBus.Core
 {
     public sealed class AzureServiceBusWorker : BackgroundService
     {
-        private ServiceBusClient? _serviceBusClient;
-        private ServiceBusAdministrationClient? _adminClient;
-        private Dictionary<(string Name, ServiceBusType), ServiceBusProcessor> _processors = new Dictionary<(string Name, ServiceBusType Type), ServiceBusProcessor>();
-        public CancellationTokenRegistration StoppingTokenRegistration;
-        private readonly AzureServiceBusWorkerRegistrationDetail _registration;
         private readonly ILogger<AzureServiceBusWorkerRegistration> _logger;
+        private readonly AzureServiceBusWorkerRegistrationDetail _registration;
         private readonly IServiceScopeFactory _serviceScopeFactory;
+
+        private readonly MethodInfo processTaskResultMethod = typeof(AzureServiceBusWorker).GetMethod(nameof(ProcessTaskResult), BindingFlags.NonPublic | BindingFlags.Instance)!;
+        private ServiceBusAdministrationClient? _adminClient;
+        private readonly Dictionary<(string Name, ServiceBusType), ServiceBusProcessor> _processors = new Dictionary<(string Name, ServiceBusType Type), ServiceBusProcessor>();
+        private ServiceBusClient? _serviceBusClient;
+        public CancellationTokenRegistration StoppingTokenRegistration;
 
         public AzureServiceBusWorker(AzureServiceBusWorkerRegistrationDetail registration, ILogger<AzureServiceBusWorkerRegistration> logger, IServiceScopeFactory serviceScopeFactory)
         {
@@ -66,7 +68,7 @@ namespace MinimalAzureServiceBus.Core
         {
             _logger.LogInformation("ASB Worker Started at: {time}", DateTimeOffset.Now);
 
-            if (string.IsNullOrEmpty(_registration.ServiceBusConnectionString)) 
+            if (string.IsNullOrEmpty(_registration.ServiceBusConnectionString))
                 await base.StartAsync(cancellationToken);
 
             _serviceBusClient = new ServiceBusClient(_registration.ServiceBusConnectionString);
@@ -108,47 +110,49 @@ namespace MinimalAzureServiceBus.Core
 
                 var processor = _processors[key];
 
-                processor.ProcessMessageAsync += async args =>
-                {
-                    var asyncServiceScope = _serviceScopeFactory.CreateAsyncScope();
-                    
-                    if (args.Message.ApplicationProperties.ContainsKey("retryCount"))
-                    {
-                        var retryCount = (int) args.Message.ApplicationProperties["retryCount"];
-                        var retrySourceEntityPath = args.Message.ApplicationProperties.ContainsKey("retrySourceEntityPath") ? (string)args.Message.ApplicationProperties["retrySourceEntityPath"] : null;
-                        var currentEntityPath = args.EntityPath;
-
-                        if (retrySourceEntityPath != null && currentEntityPath != retrySourceEntityPath)
-                            return;
-
-                        if (retryCount >= _registration.RetryConfiguration.MaxRetries)
-                        {
-                            var errorQueueName = _registration.ErrorHandlingConfiguration.ErrorQueueName;
-
-                            if (errorQueueName == null)
-                            {
-                                await args.DeadLetterMessageAsync(args.Message, cancellationToken: cancellationToken);
-                                
-                                return;
-                            }
-
-                            await SendToErrorQueue(asyncServiceScope.ServiceProvider.GetRequiredService<IMessageSender>(), errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args);
-
-                            return;
-                        }
-                    }
-
-                    await TryInvokeDelegateWithParameters(key, asyncServiceScope, args);
-                };
+                processor.ProcessMessageAsync += HandleDelegate(key, _serviceScopeFactory, cancellationToken);
             }
 
             await base.StartAsync(cancellationToken);
         }
 
+        public Func<ProcessMessageEventArgs, Task> HandleDelegate((string name, ServiceBusType registrationType) key, IServiceScopeFactory scopeFactory, CancellationToken cancellationToken) =>
+            async args =>
+            {
+                var scope = scopeFactory.CreateAsyncScope();
+
+                if (args.Message.ApplicationProperties.ContainsKey("retryCount"))
+                {
+                    var retryCount = (int) args.Message.ApplicationProperties["retryCount"];
+                    var retrySourceEntityPath = args.Message.ApplicationProperties.ContainsKey("retrySourceEntityPath") ? (string) args.Message.ApplicationProperties["retrySourceEntityPath"] : null;
+                    var currentEntityPath = args.EntityPath;
+
+                    if (retrySourceEntityPath != null && currentEntityPath != retrySourceEntityPath)
+                        return;
+
+                    if (retryCount >= _registration.RetryConfiguration.MaxRetries)
+                    {
+                        var errorQueueName = _registration.ErrorHandlingConfiguration.ErrorQueueName;
+
+                        if (errorQueueName == null)
+                        {
+                            await args.DeadLetterMessageAsync(args.Message, cancellationToken: cancellationToken);
+
+                            return;
+                        }
+
+                        await SendToErrorQueue(scope.ServiceProvider.GetRequiredService<IMessageSender>(), errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args);
+
+                        return;
+                    }
+                }
+
+                await TryInvokeDelegateWithParameters(key, scope, args);
+            };
+
         public async Task TryInvokeDelegateWithParameters((string name, ServiceBusType registrationType) key, AsyncServiceScope scope, ProcessMessageEventArgs args)
         {
             var watch = Stopwatch.StartNew();
-            var (queueTopicName, registrationType) = key;
             var del = _registration.DelegateHandlerRegistrations[key];
             var delegateDetail = DelegateInfo.From(del);
             var parameterValues = new Dictionary<string, object>();
@@ -157,10 +161,10 @@ namespace MinimalAzureServiceBus.Core
             foreach (var (paramName, type) in delegateDetail.Parameters)
             {
                 var service = scope.ServiceProvider.GetService(type);
-                
+
                 if (service != null)
                     parameterValues[paramName] = service;
-                else if(unresolvedParam != null)
+                else if (unresolvedParam != null)
                     throw new InvalidOperationException("Unable to type to serialize the message as.");
                 else
                     unresolvedParam = (paramName, type);
@@ -178,36 +182,38 @@ namespace MinimalAzureServiceBus.Core
                     parameterValues[name] = deserializedObject;
                 else
                     throw new InvalidOperationException($"Failed to deserialize the message body to the required parameter type: {type}.");
-
             }
 
+            object result;
 
-            var values = delegateDetail.Parameters.Keys.Select(key => parameterValues[key]).ToArray(); // Ensures values are in the correct order
-            var result = delegateDetail.Delegate.Method.Invoke(delegateDetail.Delegate.Target, values);
-
-            if (!(result is Task taskResult))
-                return; // For non-Task methods
-
-            if (delegateDetail.InnerReturnType == null)
+            try
             {
-                await taskResult; // Await the task to ensure completion
+                result = delegateDetail.InvokeWith(parameterValues);
 
-                return;
+                if (!(result is Task taskResult))
+                {
+                    result = Task.FromResult(new SuccessResult());
+                }
+                else if (delegateDetail.InnerReturnType == null)
+                {
+                    await taskResult; // Await the task to ensure completion
+
+                    result = Task.FromResult(new SuccessResult());
+                }
+            }
+            catch (Exception ex)
+            {
+                result = Task.FromResult(new CompleteFailureResult(ex));
             }
 
             // Create a method call to ProcessTaskResult<T> using reflection
-            var processTaskResultMethod = typeof(AzureServiceBusWorker).GetMethod(nameof(ProcessTaskResult), BindingFlags.NonPublic | BindingFlags.Instance);
+            var genericMethod = processTaskResultMethod.MakeGenericMethod(result.GetType().GetGenericArguments()[0]);
 
-            if (processTaskResultMethod != null)
-            {
-                var genericMethod = processTaskResultMethod.MakeGenericMethod(delegateDetail.InnerReturnType);
+            // Since we're calling an async method, we need to await it. However, MethodInfo.Invoke returns an object, so we need to cast it to Task to await.
+            var processTask = genericMethod.Invoke(this, new[] {result, scope, args, key});
 
-                // Since we're calling an async method, we need to await it. However, MethodInfo.Invoke returns an object, so we need to cast it to Task to await.
-                var processTask = genericMethod.Invoke(this, new object[] { taskResult, scope, args, key });
-
-                if (processTask is Task processTaskResult)
-                    await processTaskResult;
-            }
+            if (processTask is Task processTaskResult)
+                await processTaskResult;
         }
 
         private async Task SendToErrorQueue(IMessageSender sender, string errorQueueName, CompleteFailureResult result, ProcessMessageEventArgs args)
@@ -250,13 +256,15 @@ namespace MinimalAzureServiceBus.Core
                     // handle the result
 
                     var retryMessage = new ServiceBusMessage(args.Message.Body);
-                    var retryCount = args.Message.ApplicationProperties.ContainsKey("retryCount") ? (int)args.Message.ApplicationProperties["retryCount"] : 0;
+                    var retryCount = args.Message.ApplicationProperties.ContainsKey("retryCount") ? (int) args.Message.ApplicationProperties["retryCount"] : 0;
 
                     retryMessage.ApplicationProperties.Add("retryCount", retryCount);
                     retryMessage.ApplicationProperties.Add("lastError", failureResult.Message);
 
                     if (key.registrationType == ServiceBusType.Queue)
+                    {
                         await sender.SendAsync(key.name, retryMessage);
+                    }
                     else if (key.registrationType == ServiceBusType.Topic)
                     {
                         retryMessage.ApplicationProperties.Add("retrySourceEntityPath", args.EntityPath);
@@ -266,14 +274,16 @@ namespace MinimalAzureServiceBus.Core
 
                     break;
                 case CompleteFailureResult completeFailureResult:
-                    if (_registration.ErrorHandlingConfiguration.ErrorQueueName == null)
+                    if (_registration.ErrorHandlingConfiguration is {SendUnhandledExceptionsToErrorQueue: true, ErrorQueueName: { }})
+                    {
+                        await SendToErrorQueue(sender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args);
+                    }
+                    else
                     {
                         await args.DeadLetterMessageAsync(args.Message);
-                        
+
                         return;
                     }
-                    
-                    await SendToErrorQueue(sender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args);
 
                     break;
                 case DeferredResult deferredResult:
@@ -309,7 +319,6 @@ namespace MinimalAzureServiceBus.Core
 
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
-
             foreach (var (_, processor) in _processors)
             {
                 await processor.StopProcessingAsync(cancellationToken);
@@ -323,7 +332,5 @@ namespace MinimalAzureServiceBus.Core
 
             _logger.LogInformation("Azure Service Bus Worker Stopped at: {time}", DateTimeOffset.Now);
         }
-
     }
-
 }

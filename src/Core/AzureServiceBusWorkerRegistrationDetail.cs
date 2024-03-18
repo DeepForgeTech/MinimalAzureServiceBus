@@ -13,7 +13,7 @@ namespace MinimalAzureServiceBus.Core
         internal string ServiceBusConnectionString => _serviceBusConnectionString;
         internal string AppName => _appName;
         internal Dictionary<(string Name, ServiceBusType RegistrationType), Delegate> DelegateHandlerRegistrations => _delegateHandlerRegistrations;
-        public RetryConfiguration RetryConfiguration { get; set; } = new RetryConfiguration { MaxRetries = 10, RetryStrategy = RetryStrategy.Exponential };
+        public RetryConfiguration RetryConfiguration { get; set; } = new RetryConfiguration {MaxRetries = 10, RetryStrategy = RetryStrategy.Exponential};
     }
 
     public class RetryConfiguration
