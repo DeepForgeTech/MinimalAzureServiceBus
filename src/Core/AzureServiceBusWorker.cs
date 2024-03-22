@@ -77,17 +77,20 @@ namespace MinimalAzureServiceBus.Core
             foreach (var (name, registrationType) in _registration.DelegateHandlerRegistrations.Keys)
             {
                 var key = (name, registrationType);
+                var (_, configuration) = _registration.DelegateHandlerRegistrations[key];
 
                 if (!_processors.ContainsKey(key))
                 {
                     ServiceBusProcessor? newProcessor;
+
+                    var options = ProcessingConfiguration.ToServiceBusProcessorOptions(configuration);
 
                     switch (registrationType)
                     {
                         case ServiceBusType.Queue:
                             await _adminClient.EnsureQueueExistsAsync(name, _logger);
 
-                            newProcessor = _serviceBusClient.CreateProcessor(name);
+                            newProcessor = _serviceBusClient.CreateProcessor(name, options);
 
                             break;
                         case ServiceBusType.Topic:
@@ -95,7 +98,7 @@ namespace MinimalAzureServiceBus.Core
                             await _adminClient.EnsureTopicExistsAsync(name, _logger);
                             await _adminClient.EnsureSubscriptionExistsAsync(name, _registration.AppName, _logger);
 
-                            newProcessor = _serviceBusClient.CreateProcessor(name, _registration.AppName);
+                            newProcessor = _serviceBusClient.CreateProcessor(name, _registration.AppName, options);
 
                             break;
                         }
@@ -124,6 +127,7 @@ namespace MinimalAzureServiceBus.Core
                 if (args.Message.ApplicationProperties.ContainsKey("retryCount"))
                 {
                     var retryCount = (int) args.Message.ApplicationProperties["retryCount"];
+                    var messageType = args.Message.ApplicationProperties.ContainsKey("messageType") ? (string)args.Message.ApplicationProperties["messageType"] : null;
                     var retrySourceEntityPath = args.Message.ApplicationProperties.ContainsKey("retrySourceEntityPath") ? (string) args.Message.ApplicationProperties["retrySourceEntityPath"] : null;
                     var currentEntityPath = args.EntityPath;
 
@@ -141,7 +145,7 @@ namespace MinimalAzureServiceBus.Core
                             return;
                         }
 
-                        await SendToErrorQueue(scope.ServiceProvider.GetRequiredService<IMessageSender>(), errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args);
+                        await SendToErrorQueue(scope.ServiceProvider.GetRequiredService<IMessageSender>(), errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args, messageType);
 
                         return;
                     }
@@ -153,10 +157,11 @@ namespace MinimalAzureServiceBus.Core
         public async Task TryInvokeDelegateWithParameters((string name, ServiceBusType registrationType) key, AsyncServiceScope scope, ProcessMessageEventArgs args)
         {
             var watch = Stopwatch.StartNew();
-            var del = _registration.DelegateHandlerRegistrations[key];
-            var delegateDetail = DelegateInfo.From(del);
+            var (delegateToInvoke, _) = _registration.DelegateHandlerRegistrations[key];
+            var delegateDetail = DelegateInfo.From(delegateToInvoke);
             var parameterValues = new Dictionary<string, object>();
             (string Name, Type Type)? unresolvedParam = null;
+            Type? messageType = null;
 
             foreach (var (paramName, type) in delegateDetail.Parameters)
             {
@@ -179,7 +184,10 @@ namespace MinimalAzureServiceBus.Core
                 });
 
                 if (deserializedObject != null)
+                {
                     parameterValues[name] = deserializedObject;
+                    messageType = type;
+                }
                 else
                     throw new InvalidOperationException($"Failed to deserialize the message body to the required parameter type: {type}.");
             }
@@ -210,17 +218,18 @@ namespace MinimalAzureServiceBus.Core
             var genericMethod = processTaskResultMethod.MakeGenericMethod(result.GetType().GetGenericArguments()[0]);
 
             // Since we're calling an async method, we need to await it. However, MethodInfo.Invoke returns an object, so we need to cast it to Task to await.
-            var processTask = genericMethod.Invoke(this, new[] {result, scope, args, key});
+            var processTask = genericMethod.Invoke(this, new[] {result, scope, args, key, messageType?.AssemblyQualifiedName });
 
             if (processTask is Task processTaskResult)
                 await processTaskResult;
         }
 
-        private async Task SendToErrorQueue(IMessageSender sender, string errorQueueName, CompleteFailureResult result, ProcessMessageEventArgs args)
+        private async Task SendToErrorQueue(IMessageSender sender, string errorQueueName, CompleteFailureResult result, ProcessMessageEventArgs args, string? messageType)
         {
             var errorMessage = new
             {
                 OriginalMessage = args.Message.Body.ToString(),
+                OriginalMessageType = messageType,
                 OriginatingEntityPath = args.EntityPath,
                 OriginatingApp = _registration.AppName,
                 ExceptionMessage = result.Message,
@@ -241,7 +250,7 @@ namespace MinimalAzureServiceBus.Core
             await sender.SendAsync(errorQueueName, errorQueueMessage);
         }
 
-        private async Task ProcessTaskResult<T>(Task<T> task, AsyncServiceScope scope, ProcessMessageEventArgs args, (string name, ServiceBusType registrationType) key)
+        private async Task ProcessTaskResult<T>(Task<T> task, AsyncServiceScope scope, ProcessMessageEventArgs args, (string name, ServiceBusType registrationType) key, string? messageType)
         {
             var result = await task;
             var sender = scope.ServiceProvider.GetRequiredService<IMessageSender>();
@@ -260,6 +269,7 @@ namespace MinimalAzureServiceBus.Core
 
                     retryMessage.ApplicationProperties.Add("retryCount", retryCount);
                     retryMessage.ApplicationProperties.Add("lastError", failureResult.Message);
+                    retryMessage.ApplicationProperties.Add("messageType", messageType);
 
                     if (key.registrationType == ServiceBusType.Queue)
                     {
@@ -276,7 +286,7 @@ namespace MinimalAzureServiceBus.Core
                 case CompleteFailureResult completeFailureResult:
                     if (_registration.ErrorHandlingConfiguration is {SendUnhandledExceptionsToErrorQueue: true, ErrorQueueName: { }})
                     {
-                        await SendToErrorQueue(sender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args);
+                        await SendToErrorQueue(sender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args, messageType);
                     }
                     else
                     {
@@ -298,6 +308,7 @@ namespace MinimalAzureServiceBus.Core
 
                     message.ScheduledEnqueueTime = newDateTime;
                     message.ApplicationProperties.Add("deferred", true);
+                    message.ApplicationProperties.Add("messageType", messageType);
 
                     if (key.registrationType == ServiceBusType.Queue)
                         await sender.SendAsync(key.name, message);

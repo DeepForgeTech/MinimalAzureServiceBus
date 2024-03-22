@@ -1,15 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Text.Json;
-using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
+using MinimalAzureServiceBus.Core.Models;
 
 namespace MinimalAzureServiceBus.Core
 {
-    public delegate AzureServiceBusWorkerRegistration AzureServiceBusWorkerRegistrationDelegate(
-        string queueName,
-        Func<AsyncServiceScope, string, Task> handlerFactoryFunc);
-
     public enum ServiceBusType
     {
         Queue,
@@ -18,7 +12,7 @@ namespace MinimalAzureServiceBus.Core
 
     public class AzureServiceBusWorkerRegistration
     {
-        protected Dictionary<(string Name, ServiceBusType RegistrationType), Delegate> _delegateHandlerRegistrations = new Dictionary<(string Name, ServiceBusType RegistrationType), Delegate>();
+        protected Dictionary<(string Name, ServiceBusType RegistrationType), (Delegate, ProcessingConfiguration)> _delegateHandlerRegistrations = new Dictionary<(string Name, ServiceBusType RegistrationType), (Delegate, ProcessingConfiguration)>();
 
         internal AzureServiceBusWorkerRegistration(string serviceBusConnectionString, string appName)
         {
@@ -30,19 +24,55 @@ namespace MinimalAzureServiceBus.Core
         protected readonly string _appName;
 
         protected ErrorHandlingConfiguration _errorHandlingConfiguration = new ErrorHandlingConfiguration();
+        protected ProcessingConfiguration _defaultProcessingConfiguration = new ProcessingConfiguration();
 
-        private Func<string, Delegate, AzureServiceBusWorkerRegistration> AddRegistration(ServiceBusType registrationType) =>
-            (name, handler) =>
+        protected static ProcessingConfiguration ConfigureProcessing(
+            ProcessingConfiguration initialConfig,
+            Action<ProcessingConfiguration>? configurationAction = null)
+        {
+            // Clone the initial configuration to ensure that the original instance is not modified.
+            var newConfig = new ProcessingConfiguration
             {
-                _delegateHandlerRegistrations.Add((name, registrationType), handler);
+                PrefetchCount = initialConfig.PrefetchCount,
+                MaxConcurrentCalls = initialConfig.MaxConcurrentCalls,
+                LockDuration = initialConfig.LockDuration,
+                MaxAutoLockRenewalDuration = initialConfig.MaxAutoLockRenewalDuration
+            };
+
+            // Apply the configuration action if it's provided.
+            configurationAction?.Invoke(newConfig);
+
+            return newConfig;
+        }
+
+        private Func<string, Delegate, Action<ProcessingConfiguration>?, AzureServiceBusWorkerRegistration> AddRegistration(ServiceBusType registrationType) =>
+            (name, handler, createConfiguration) =>
+            {
+                _delegateHandlerRegistrations.Add((name, registrationType), (handler, ConfigureProcessing(_defaultProcessingConfiguration, createConfiguration)));
 
                 return this;
             };
 
-        public AzureServiceBusWorkerRegistration ProcessQueue(string queueName, Delegate handler) =>
-            AddRegistration(ServiceBusType.Queue)(queueName, handler);
-        public AzureServiceBusWorkerRegistration SubscribeTopic(string topicName, Delegate handler) =>
-            AddRegistration(ServiceBusType.Topic)(topicName, handler);
+        public AzureServiceBusWorkerRegistration ProcessQueue(string queueName, Delegate handler, Action<ProcessingConfiguration>? createConfiguration = null) =>
+            AddRegistration(ServiceBusType.Queue)(queueName, handler, createConfiguration);
+        public AzureServiceBusWorkerRegistration SubscribeTopic(string topicName, Delegate handler, Action<ProcessingConfiguration>? createConfiguration = null) =>
+            AddRegistration(ServiceBusType.Topic)(topicName, handler, createConfiguration);
+
+        public AzureServiceBusWorkerRegistration WithDefaultConfiguration(Action<ProcessingConfiguration> configure)
+        {
+            var configuration = new ProcessingConfiguration();
+
+            configure(configuration);
+
+            return WithDefaultConfiguration(configuration);
+        }
+
+        public AzureServiceBusWorkerRegistration WithDefaultConfiguration(ProcessingConfiguration processingConfiguration)
+        {
+            _defaultProcessingConfiguration = processingConfiguration;
+
+            return this;
+        }
 
         /// <summary>
         /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
