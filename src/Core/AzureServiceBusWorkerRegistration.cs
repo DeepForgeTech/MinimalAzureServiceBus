@@ -1,30 +1,32 @@
 ﻿using System;
 using System.Collections.Generic;
+using Castle.DynamicProxy;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using MinimalAzureServiceBus.Core.DynamicSender;
 using MinimalAzureServiceBus.Core.Models;
 
 namespace MinimalAzureServiceBus.Core
 {
-    public enum ServiceBusType
-    {
-        Queue,
-        Topic
-    }
 
     public class AzureServiceBusWorkerRegistration
     {
+        protected readonly string _appName;
+        private readonly IServiceCollection _services;
+        private readonly ProxyGenerator _proxyGenerator = new ProxyGenerator();
+
+        protected readonly string _serviceBusConnectionString;
+        protected ProcessingConfiguration _defaultProcessingConfiguration = new ProcessingConfiguration();
         protected Dictionary<(string Name, ServiceBusType RegistrationType), (Delegate, ProcessingConfiguration)> _delegateHandlerRegistrations = new Dictionary<(string Name, ServiceBusType RegistrationType), (Delegate, ProcessingConfiguration)>();
 
-        internal AzureServiceBusWorkerRegistration(string serviceBusConnectionString, string appName)
+        protected ErrorHandlingConfiguration _errorHandlingConfiguration = new ErrorHandlingConfiguration();
+
+        internal AzureServiceBusWorkerRegistration(string serviceBusConnectionString, string appName, IServiceCollection services)
         {
             _serviceBusConnectionString = serviceBusConnectionString;
             _appName = appName;
+            _services = services;
         }
-
-        protected readonly string _serviceBusConnectionString;
-        protected readonly string _appName;
-
-        protected ErrorHandlingConfiguration _errorHandlingConfiguration = new ErrorHandlingConfiguration();
-        protected ProcessingConfiguration _defaultProcessingConfiguration = new ProcessingConfiguration();
 
         protected static ProcessingConfiguration ConfigureProcessing(
             ProcessingConfiguration initialConfig,
@@ -55,6 +57,7 @@ namespace MinimalAzureServiceBus.Core
 
         public AzureServiceBusWorkerRegistration ProcessQueue(string queueName, Delegate handler, Action<ProcessingConfiguration>? createConfiguration = null) =>
             AddRegistration(ServiceBusType.Queue)(queueName, handler, createConfiguration);
+
         public AzureServiceBusWorkerRegistration SubscribeTopic(string topicName, Delegate handler, Action<ProcessingConfiguration>? createConfiguration = null) =>
             AddRegistration(ServiceBusType.Topic)(topicName, handler, createConfiguration);
 
@@ -75,7 +78,8 @@ namespace MinimalAzureServiceBus.Core
         }
 
         /// <summary>
-        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        ///     Configures the behaviour for handling errors and retries. The default value for errorQueueName is
+        ///     $"{appName}-error"
         /// </summary>
         public AzureServiceBusWorkerRegistration EnableErrorHandling(string? errorQueueName = null)
         {
@@ -88,7 +92,8 @@ namespace MinimalAzureServiceBus.Core
         }
 
         /// <summary>
-        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        ///     Configures the behaviour for handling errors and retries. The default value for errorQueueName is
+        ///     $"{appName}-error"
         /// </summary>
         public AzureServiceBusWorkerRegistration EnableErrorHandling(ErrorHandlingConfiguration exceptionConfiguration)
         {
@@ -98,13 +103,23 @@ namespace MinimalAzureServiceBus.Core
         }
 
         /// <summary>
-        /// Configures the behaviour for handling errors and retries. The default value for errorQueueName is $"{appName}-error"
+        ///     Configures the behaviour for handling errors and retries. The default value for errorQueueName is
+        ///     $"{appName}-error"
         /// </summary>
         public AzureServiceBusWorkerRegistration EnableErrorHandling(Action<ErrorHandlingConfiguration> configure)
         {
             _errorHandlingConfiguration = new ErrorHandlingConfiguration();
 
             configure(_errorHandlingConfiguration);
+
+            return this;
+        }
+
+        public AzureServiceBusWorkerRegistration AddMinimalClient<T>() where T : class
+        {
+            _services.AddScoped(provider =>
+                _proxyGenerator.CreateInterfaceProxyWithoutTarget<T>(
+                    new SenderInterceptor(_serviceBusConnectionString, provider.GetRequiredService<ILoggerFactory>())));
 
             return this;
         }
