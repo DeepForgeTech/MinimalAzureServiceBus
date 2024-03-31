@@ -4,15 +4,16 @@ using System;
 using System.Threading.Tasks;
 using Azure.Messaging.ServiceBus.Administration;
 using Microsoft.Extensions.Logging;
+using MinimalAzureServiceBus.Core.Models;
 
 namespace MinimalAzureServiceBus.Core
 {
     public interface IMessageSender
     {
-        Task SendAsync<TMessage>(string queueOrTopicName, TMessage message) where TMessage : class;
+        Task SendAsync<TMessage>(string queueName, TMessage message) where TMessage : class;
         Task PublishAsync<TMessage>(string topicName, TMessage message) where TMessage : class;
-        Task SendAsync(string queueOrTopicName, ServiceBusMessage message);
-        Task PublishAsync(string keyName, ServiceBusMessage message);
+        Task SendAsync(string queueName, ServiceBusMessage message);
+        Task PublishAsync(string topicName, ServiceBusMessage message);
     }
 
     public class MessageSender : IMessageSender
@@ -34,10 +35,10 @@ namespace MinimalAzureServiceBus.Core
         public async Task PublishAsync<TMessage>(string topicName, TMessage message) where TMessage : class => 
             await SendAsync(topicName, ServiceBusType.Topic, message);
 
-        public async Task SendAsync(string queueOrTopicName, ServiceBusMessage serviceBusMessage) =>
-            await SendAsync(queueOrTopicName, ServiceBusType.Queue, serviceBusMessage);
-        public async Task PublishAsync(string queueOrTopicName, ServiceBusMessage serviceBusMessage) =>
-            await SendAsync(queueOrTopicName, ServiceBusType.Topic, serviceBusMessage);
+        public async Task SendAsync(string queueName, ServiceBusMessage serviceBusMessage) =>
+            await SendAsync(queueName, ServiceBusType.Queue, serviceBusMessage);
+        public async Task PublishAsync(string topicName, ServiceBusMessage serviceBusMessage) =>
+            await SendAsync(topicName, ServiceBusType.Topic, serviceBusMessage);
 
         async Task SendAsync<TMessage>(string name, ServiceBusType messageType, TMessage message) where TMessage : class
         {
@@ -54,10 +55,18 @@ namespace MinimalAzureServiceBus.Core
         {
             await using var client = new ServiceBusClient(_serviceBusConnectionString);
 
-            if (messageType == ServiceBusType.Queue)
-                await _adminClient.EnsureQueueExistsAsync(queueOrTopicName);
-            else
-                await _adminClient.EnsureTopicExistsAsync(queueOrTopicName);
+            switch (messageType)
+            {
+                case ServiceBusType.Queue:
+                    await _adminClient.EnsureQueueExistsAsync(queueOrTopicName);
+                    break;
+                case ServiceBusType.Topic:
+                    await _adminClient.EnsureTopicExistsAsync(queueOrTopicName);
+                    break;
+                case ServiceBusType.Unknown:
+                default:
+                    throw new ArgumentException("Invalid message type", nameof(messageType));
+            }
 
             await using var sender = client.CreateSender(queueOrTopicName);
 

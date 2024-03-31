@@ -1,13 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
 using MinimalAzureServiceBus.Core.Models;
 
 namespace MinimalAzureServiceBus.Core
 {
     public class AzureServiceBusWorkerRegistrationDetail : AzureServiceBusWorkerRegistration
     {
-        public AzureServiceBusWorkerRegistrationDetail(string serviceBusConnectionString, string appName) : base(serviceBusConnectionString, appName)
+
+        public AzureServiceBusWorkerRegistrationDetail(string serviceBusConnectionString, string appName, IServiceCollection services) : base(serviceBusConnectionString, appName, services)
         {
+
         }
 
         internal ErrorHandlingConfiguration ErrorHandlingConfiguration => _errorHandlingConfiguration;

@@ -17,9 +17,10 @@ namespace MinimalAzureServiceBus.Core
 {
     public sealed class AzureServiceBusWorker : BackgroundService
     {
-        private readonly ILogger<AzureServiceBusWorkerRegistration> _logger;
+        private readonly ILogger<AzureServiceBusWorker> _logger;
         private readonly AzureServiceBusWorkerRegistrationDetail _registration;
         private readonly IServiceScopeFactory _serviceScopeFactory;
+        private readonly MessageSender _messageSender;
 
         private readonly MethodInfo processTaskResultMethod = typeof(AzureServiceBusWorker).GetMethod(nameof(ProcessTaskResult), BindingFlags.NonPublic | BindingFlags.Instance)!;
         private ServiceBusAdministrationClient? _adminClient;
@@ -27,11 +28,12 @@ namespace MinimalAzureServiceBus.Core
         private ServiceBusClient? _serviceBusClient;
         public CancellationTokenRegistration StoppingTokenRegistration;
 
-        public AzureServiceBusWorker(AzureServiceBusWorkerRegistrationDetail registration, ILogger<AzureServiceBusWorkerRegistration> logger, IServiceScopeFactory serviceScopeFactory)
+        public AzureServiceBusWorker(AzureServiceBusWorkerRegistrationDetail registration, ILoggerFactory loggerFactory, IServiceScopeFactory serviceScopeFactory)
         {
             _registration = registration;
-            _logger = logger;
+            _logger = loggerFactory.CreateLogger<AzureServiceBusWorker>();
             _serviceScopeFactory = serviceScopeFactory;
+            _messageSender = new MessageSender(_registration.ServiceBusConnectionString, loggerFactory.CreateLogger<MessageSender>());
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -102,6 +104,7 @@ namespace MinimalAzureServiceBus.Core
 
                             break;
                         }
+                        case ServiceBusType.Unknown:
                         default:
                             throw new NotImplementedException($"{registrationType} is not a valid message type. Values are \"Queue\" or \"Topic\"");
                     }
@@ -145,7 +148,7 @@ namespace MinimalAzureServiceBus.Core
                             return;
                         }
 
-                        await SendToErrorQueue(scope.ServiceProvider.GetRequiredService<IMessageSender>(), errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args, messageType);
+                        await SendToErrorQueue(_messageSender, errorQueueName, new CompleteFailureResult(new MaxRetriesExhaustedException(_registration.RetryConfiguration.MaxRetries)), args, messageType);
 
                         return;
                     }
@@ -218,7 +221,7 @@ namespace MinimalAzureServiceBus.Core
             var genericMethod = processTaskResultMethod.MakeGenericMethod(result.GetType().GetGenericArguments()[0]);
 
             // Since we're calling an async method, we need to await it. However, MethodInfo.Invoke returns an object, so we need to cast it to Task to await.
-            var processTask = genericMethod.Invoke(this, new[] {result, scope, args, key, messageType?.AssemblyQualifiedName });
+            var processTask = genericMethod.Invoke(this, new[] {result, args, key, messageType?.AssemblyQualifiedName });
 
             if (processTask is Task processTaskResult)
                 await processTaskResult;
@@ -250,10 +253,9 @@ namespace MinimalAzureServiceBus.Core
             await sender.SendAsync(errorQueueName, errorQueueMessage);
         }
 
-        private async Task ProcessTaskResult<T>(Task<T> task, AsyncServiceScope scope, ProcessMessageEventArgs args, (string name, ServiceBusType registrationType) key, string? messageType)
+        private async Task ProcessTaskResult<T>(Task<T> task, ProcessMessageEventArgs args, (string name, ServiceBusType registrationType) key, string? messageType)
         {
             var result = await task;
-            var sender = scope.ServiceProvider.GetRequiredService<IMessageSender>();
 
             switch (result)
             {
@@ -271,22 +273,26 @@ namespace MinimalAzureServiceBus.Core
                     retryMessage.ApplicationProperties.Add("lastError", failureResult.Message);
                     retryMessage.ApplicationProperties.Add("messageType", messageType);
 
-                    if (key.registrationType == ServiceBusType.Queue)
+                    switch (key.registrationType)
                     {
-                        await sender.SendAsync(key.name, retryMessage);
-                    }
-                    else if (key.registrationType == ServiceBusType.Topic)
-                    {
-                        retryMessage.ApplicationProperties.Add("retrySourceEntityPath", args.EntityPath);
+                        case ServiceBusType.Queue:
+                            await _messageSender.SendAsync(key.name, retryMessage);
+                            break;
+                        case ServiceBusType.Topic:
+                            retryMessage.ApplicationProperties.Add("retrySourceEntityPath", args.EntityPath);
 
-                        await sender.PublishAsync(key.name, retryMessage);
+                            await _messageSender.PublishAsync(key.name, retryMessage);
+                            break;
+                        case ServiceBusType.Unknown:
+                        default:
+                            throw new ArgumentOutOfRangeException();
                     }
 
                     break;
                 case CompleteFailureResult completeFailureResult:
                     if (_registration.ErrorHandlingConfiguration is {SendUnhandledExceptionsToErrorQueue: true, ErrorQueueName: { }})
                     {
-                        await SendToErrorQueue(sender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args, messageType);
+                        await SendToErrorQueue(_messageSender, _registration.ErrorHandlingConfiguration.ErrorQueueName, completeFailureResult, args, messageType);
                     }
                     else
                     {
@@ -311,9 +317,9 @@ namespace MinimalAzureServiceBus.Core
                     message.ApplicationProperties.Add("messageType", messageType);
 
                     if (key.registrationType == ServiceBusType.Queue)
-                        await sender.SendAsync(key.name, message);
+                        await _messageSender.SendAsync(key.name, message);
                     else if (key.registrationType == ServiceBusType.Topic)
-                        await sender.PublishAsync(key.name, message);
+                        await _messageSender.PublishAsync(key.name, message);
 
                     break;
             }
