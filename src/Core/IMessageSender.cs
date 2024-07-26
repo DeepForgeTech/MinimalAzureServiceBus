@@ -76,9 +76,14 @@ namespace MinimalAzureServiceBus.Core
 
                 _logger.LogTrace("Message sent to queue Or topic named {Name}", queueOrTopicName);
             }
+            catch (ServiceBusException) // Being Throttled, TODO: check specific error code
+            {
+                // No need to log, leave to client
+                throw;
+            }
             catch (Exception e)
             {
-                _logger.LogError("An error occurred while sending message sent to queue Or topic named {Name}. Type: {Type}. Message: {Message}", queueOrTopicName, e.GetType().Name, e.Message);
+                _logger.LogError("An unhandled exception occurred while sending message sent to queue Or topic named {Name}. Type: {Type}. Message: {Message}", queueOrTopicName, e.GetType().Name, e.Message);
 
                 throw;
             }
