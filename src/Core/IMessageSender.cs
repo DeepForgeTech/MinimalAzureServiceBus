@@ -1,6 +1,8 @@
 ﻿using Azure.Messaging.ServiceBus;
 using System.Text.Json;
 using System;
+using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading.Tasks;
 using Azure.Messaging.ServiceBus.Administration;
 using Microsoft.Extensions.Logging;
@@ -21,6 +23,8 @@ namespace MinimalAzureServiceBus.Core
         private readonly string _serviceBusConnectionString;
         private readonly ILogger<MessageSender> _logger;
         private readonly ServiceBusAdministrationClient _adminClient;
+
+        private ConcurrentBag<(ServiceBusType Type, string Name)> _initialized = new ConcurrentBag<(ServiceBusType Type, string Name)>();
 
         public MessageSender(string serviceBusConnectionString, ILogger<MessageSender> logger)
         {
@@ -54,18 +58,25 @@ namespace MinimalAzureServiceBus.Core
         async Task SendAsync(string queueOrTopicName, ServiceBusType messageType, ServiceBusMessage serviceBusMessage)
         {
             await using var client = new ServiceBusClient(_serviceBusConnectionString);
+            
+            var key = (messageType, queueOrTopicName);
 
-            switch (messageType)
+            if (!_initialized.Contains(key))
             {
-                case ServiceBusType.Queue:
-                    await _adminClient.EnsureQueueExistsAsync(queueOrTopicName);
-                    break;
-                case ServiceBusType.Topic:
-                    await _adminClient.EnsureTopicExistsAsync(queueOrTopicName);
-                    break;
-                case ServiceBusType.Unknown:
-                default:
-                    throw new ArgumentException("Invalid message type", nameof(messageType));
+                switch (messageType)
+                {
+                    case ServiceBusType.Queue:
+                        await _adminClient.EnsureQueueExistsAsync(queueOrTopicName);
+                        break;
+                    case ServiceBusType.Topic:
+                        await _adminClient.EnsureTopicExistsAsync(queueOrTopicName);
+                        break;
+                    case ServiceBusType.Unknown:
+                    default:
+                        throw new ArgumentException("Invalid message type", nameof(messageType));
+                }
+
+                _initialized.Add(key);
             }
 
             await using var sender = client.CreateSender(queueOrTopicName);
@@ -76,7 +87,7 @@ namespace MinimalAzureServiceBus.Core
 
                 _logger.LogTrace("Message sent to queue Or topic named {Name}", queueOrTopicName);
             }
-            catch (ServiceBusException) // Being Throttled, TODO: check specific error code
+            catch (ServiceBusException ex) // Being Throttled, TODO: check specific error code
             {
                 // No need to log, leave to client
                 throw;

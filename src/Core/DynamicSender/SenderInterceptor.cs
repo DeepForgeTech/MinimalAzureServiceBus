@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
@@ -10,26 +12,28 @@ using MinimalAzureServiceBus.Core.Models;
 
 namespace MinimalAzureServiceBus.Core.DynamicSender
 {
-    internal class SenderInterceptor : IInterceptor, IDisposable
+    public static class MessageSenderHelper
     {
-        private readonly MessageSender _messageSender;
+        public static ConcurrentDictionary<string, (ServiceBusType Type, string Name)> _cache = new ConcurrentDictionary<string, (ServiceBusType Type, string Name)>();
 
-        internal SenderInterceptor(string connectionString, ILoggerFactory loggerFactory) => 
-            _messageSender = new MessageSender(connectionString, loggerFactory.CreateLogger<MessageSender>());
-
-        public void Intercept(IInvocation invocation)
+        public static (ServiceBusType Type, string Name) Extract(MethodInfo methodInfo, ParameterInfo[] parameters)
         {
-            if (invocation.Method.ReturnType != typeof(Task) || (invocation.Method.ReturnType.IsGenericType && invocation.Method.ReturnType.GetGenericTypeDefinition() != typeof(Task<>)))
-                throw new InvalidOperationException("Only methods that return Task are supported");
+            var methodName = methodInfo.Name;
+            var key = $"{methodInfo.DeclaringType?.FullName}.{methodName}";
 
-            if (invocation.Arguments.Length > 1)
+            if (_cache.TryGetValue(key, out var extract))
+                return extract;
+
+            if (methodInfo.ReturnType != typeof(Task) || (methodInfo.ReturnType.IsGenericType && methodInfo.ReturnType.GetGenericTypeDefinition() != typeof(Task<>)))
+                throw new InvalidOperationException("Only methods that return Task are supported");
+            
+            if (parameters.Length > 1)
                 throw new InvalidOperationException("Only one argument is allowed and that argument will be used for the body of the message");
 
-            var methodName = invocation.Method.Name;
             var messageType = ServiceBusType.Unknown;
             var name = string.Empty;
 
-            if (invocation.Method.GetCustomAttribute(inherit: true, attributeType:typeof(MessagingAttribute)) is MessagingAttribute messagingAttribute)
+            if (methodInfo.GetCustomAttribute(inherit: true, attributeType: typeof(MessagingAttribute)) is MessagingAttribute messagingAttribute)
             {
                 name = string.IsNullOrEmpty(messagingAttribute.Name) ? methodName : messagingAttribute.Name;
                 messageType = messagingAttribute switch
@@ -47,9 +51,31 @@ namespace MinimalAzureServiceBus.Core.DynamicSender
                     (messageType, name) = (ServiceBusType.Topic, methodName[7..]);
             }
 
-            var parameterType = invocation.Method.GetParameters().First().ParameterType;
+            _cache.TryAdd(key, (messageType, name));
+
+            return (messageType, name);
+        }
+    }
+
+    internal class SenderInterceptor : IInterceptor, IDisposable
+    {
+        private readonly MessageSender _messageSender;
+
+        internal SenderInterceptor(string connectionString, ILoggerFactory loggerFactory) =>
+            _messageSender = new MessageSender(connectionString, loggerFactory.CreateLogger<MessageSender>());
+
+        public void Dispose()
+        {
+            // TODO release managed resources here
+        }
+
+        public void Intercept(IInvocation invocation)
+        {
+            var parameters = invocation.Method.GetParameters();
+            var (messageType, name) = MessageSenderHelper.Extract(invocation.Method, parameters);
+            var parameterType = parameters.First().ParameterType;
             var body = JsonSerializer.Serialize(invocation.Arguments[0], parameterType);
-            var message = new ServiceBusMessage { Body = BinaryData.FromString(body) };
+            var message = new ServiceBusMessage {Body = BinaryData.FromString(body)};
             var dispatch = messageType switch
             {
                 ServiceBusType.Queue => _messageSender.SendAsync(name, message),
@@ -58,11 +84,6 @@ namespace MinimalAzureServiceBus.Core.DynamicSender
             };
 
             invocation.ReturnValue = dispatch;
-        }
-
-        public void Dispose()
-        {
-            // TODO release managed resources here
         }
     }
 }
