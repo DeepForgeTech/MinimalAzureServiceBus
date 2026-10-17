@@ -46,9 +46,16 @@ namespace MinimalAzureServiceBus.Core
                 {
                     await detail.Value.StartProcessingAsync(stoppingToken);
                 }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    // The host is stopping; StopAsync stops the processors.
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, $"Exception thrown at {nameof(AzureServiceBusWorker)} ExecuteAsync task.");
+
+                    // Fault the worker so the host sees a processor that never started.
+                    throw;
                 }
             }));
 
@@ -90,15 +97,15 @@ namespace MinimalAzureServiceBus.Core
                     switch (registrationType)
                     {
                         case ServiceBusType.Queue:
-                            await _adminClient.EnsureQueueExistsAsync(name, _logger);
+                            await _adminClient.EnsureQueueExistsAsync(name, _logger, cancellationToken);
 
                             newProcessor = _serviceBusClient.CreateProcessor(name, options);
 
                             break;
                         case ServiceBusType.Topic:
                         {
-                            await _adminClient.EnsureTopicExistsAsync(name, _logger);
-                            await _adminClient.EnsureSubscriptionExistsAsync(name, _registration.AppName, _logger);
+                            await _adminClient.EnsureTopicExistsAsync(name, _logger, cancellationToken);
+                            await _adminClient.EnsureSubscriptionExistsAsync(name, _registration.AppName, _logger, cancellationToken);
 
                             newProcessor = _serviceBusClient.CreateProcessor(name, _registration.AppName, options);
 
