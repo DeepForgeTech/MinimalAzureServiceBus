@@ -90,15 +90,15 @@ namespace MinimalAzureServiceBus.Core
                     switch (registrationType)
                     {
                         case ServiceBusType.Queue:
-                            await _adminClient.EnsureQueueExistsAsync(name, _logger);
+                            await _adminClient.EnsureQueueExistsAsync(name, _logger, cancellationToken);
 
                             newProcessor = _serviceBusClient.CreateProcessor(name, options);
 
                             break;
                         case ServiceBusType.Topic:
                         {
-                            await _adminClient.EnsureTopicExistsAsync(name, _logger);
-                            await _adminClient.EnsureSubscriptionExistsAsync(name, _registration.AppName, _logger);
+                            await _adminClient.EnsureTopicExistsAsync(name, _logger, cancellationToken);
+                            await _adminClient.EnsureSubscriptionExistsAsync(name, _registration.AppName, _logger, cancellationToken);
 
                             newProcessor = _serviceBusClient.CreateProcessor(name, _registration.AppName, options);
 
