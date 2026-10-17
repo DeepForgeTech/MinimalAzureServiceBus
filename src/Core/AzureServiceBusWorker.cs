@@ -46,9 +46,16 @@ namespace MinimalAzureServiceBus.Core
                 {
                     await detail.Value.StartProcessingAsync(stoppingToken);
                 }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    // The host is stopping; StopAsync stops the processors.
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, $"Exception thrown at {nameof(AzureServiceBusWorker)} ExecuteAsync task.");
+
+                    // Fault the worker so the host sees a processor that never started.
+                    throw;
                 }
             }));
 
